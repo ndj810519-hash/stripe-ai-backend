@@ -1,12 +1,19 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from app.voiceflow_router import router as voiceflow_router
-from app.payments_router import router as payments_router
-from app.subscription_router import router as subscription_router
+import os
+import json
+import requests
+import firebase_admin
+
+from firebase_admin import credentials, firestore
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
+# ================= CORS =================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,10 +22,170 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(voiceflow_router)
-app.include_router(payments_router)
-app.include_router(subscription_router)
+# ================= ENV =================
+VOICEFLOW_API_KEY = os.getenv("VOICEFLOW_API_KEY")
+VOICEFLOW_PROJECT_ID = os.getenv("VOICEFLOW_PROJECT_ID")
 
-@app.get("/")
-def root():
-    return {"server": "running"}
+FORTE_API_URL = os.getenv("FORTE_API_URL")
+FORTE_USERNAME = os.getenv("FORTE_USERNAME")
+FORTE_PASSWORD = os.getenv("FORTE_PASSWORD")
+
+# ================= FIREBASE =================
+if not firebase_admin._apps:
+    firebase_json = os.getenv("FIREBASE_KEY_JSON")
+    cred = credentials.Certificate(json.loads(firebase_json))
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# ================= MODEL =================
+class UserMessage(BaseModel):
+    message: str
+    user_id: str
+
+# ================= ASK =================
+@app.post("/ask")
+def ask_voiceflow(data: UserMessage):
+
+    user_ref = db.collection("users").document(data.user_id)
+    user_doc = user_ref.get()
+
+    if not user_doc.exists:
+        return {"expired": True, "redirect": "https://enoma.kz"}
+
+    user_data = user_doc.to_dict()
+    expires_at = user_data.get("expiresAt")
+
+    if not expires_at:
+        return {"expired": True, "redirect": "https://enoma.kz"}
+
+    if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
+        expires_at = expires_at.replace(tzinfo=None)
+
+    # 🔥 ЕСЛИ ВРЕМЯ ВЫШЛО
+    if datetime.utcnow() > expires_at:
+        user_ref.update({"hasAccess": False})
+
+        return {
+            "expired": True,
+            "text": "⏳ Время сессии (5 минут) завершено",
+            "redirect": "https://enoma.kz"
+        }
+
+    # ✅ VOICEFLOW
+    url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
+
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": VOICEFLOW_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "request": {
+                "type": "text",
+                "payload": data.message
+            }
+        },
+        params={"projectID": VOICEFLOW_PROJECT_ID}
+    )
+
+    traces = response.json()
+
+    texts = [
+        t["payload"]["message"]
+        for t in traces if t.get("type") == "text"
+    ]
+
+    return {"text": "\n".join(texts)}
+
+# ================= CREATE ORDER =================
+@app.get("/create-forte-order")
+async def create_forte_order(uid: str):
+
+    payload = {
+        "order": {
+            "typeRid": "Order_RID",
+            "language": "ru",
+            "amount": "990.00",
+            "currency": "KZT",
+            "description": f"{uid}|5min",
+            "title": "5-minute session",
+            "hppRedirectUrl": "https://seidkona-backend.onrender.com/forte-success"
+        }
+    }
+
+    response = requests.post(
+        f"{FORTE_API_URL}/order",
+        json=payload,
+        auth=(FORTE_USERNAME, FORTE_PASSWORD),
+        headers={"Content-Type": "application/json"}
+    )
+
+    if response.status_code != 200:
+        return {"error": response.text}
+
+    forte_response = response.json()
+
+    order_id = str(forte_response["order"]["id"])
+    password = forte_response["order"]["password"]
+    hpp_url = forte_response["order"]["hppUrl"]
+
+    db.collection("forte_orders").document(order_id).set({
+        "uid": uid,
+        "createdAt": datetime.utcnow(),
+        "isProcessed": False
+    })
+
+    return RedirectResponse(f"{hpp_url}?id={order_id}&password={password}")
+
+# ================= SUCCESS =================
+@app.get("/forte-success")
+async def forte_success(request: Request):
+
+    order_id = request.query_params.get("id") or request.query_params.get("ID")
+
+    if not order_id:
+        return RedirectResponse("https://enoma.kz")
+
+    response = requests.get(
+        f"{FORTE_API_URL}/order/{order_id}",
+        auth=(FORTE_USERNAME, FORTE_PASSWORD)
+    )
+
+    result = response.json()
+    status = result.get("order", {}).get("status")
+
+    if status not in ["FullyPaid", "Approved", "Deposited"]:
+        return RedirectResponse("https://enoma.kz")
+
+    order_ref = db.collection("forte_orders").document(order_id)
+    order_doc = order_ref.get()
+
+    if not order_doc.exists:
+        return RedirectResponse("https://enoma.kz")
+
+    order_data = order_doc.to_dict()
+
+    # 🔥 защита от повторной обработки
+    if order_data.get("isProcessed"):
+        uid = order_data["uid"]
+        return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
+
+    uid = order_data["uid"]
+
+    now = datetime.utcnow()
+    expires_at = now + timedelta(minutes=5)
+
+    db.collection("users").document(uid).set({
+        "hasAccess": True,
+        "expiresAt": expires_at,
+        "lastPaymentAt": now
+    }, merge=True)
+
+    order_ref.update({
+        "isProcessed": True,
+        "paidAt": now
+    })
+
+    return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
