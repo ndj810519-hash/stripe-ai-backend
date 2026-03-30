@@ -104,7 +104,7 @@ async def create_forte_order(uid: str):
         "order": {
             "typeRid": "Order_RID",
             "language": "ru",
-            "amount": "990.00",
+            "amount": "100.00",
             "currency": "KZT",
             "description": f"{uid}|5min",
             "title": "5-minute session",
