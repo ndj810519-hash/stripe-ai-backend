@@ -1,15 +1,17 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import os
+import uuid
 import json
 import requests
 import firebase_admin
 
 from firebase_admin import credentials, firestore
 from datetime import datetime, timedelta
+
 
 app = FastAPI()
 
@@ -38,39 +40,41 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# ================= MODEL =================
+# ================= VOICEFLOW =================
 class UserMessage(BaseModel):
     message: str
-    user_id: str
+    user_id: str | None = None
 
-# ================= VOICEFLOW =================
+
 @app.post("/ask")
 def ask_voiceflow(data: UserMessage):
 
-    user_ref = db.collection("users").document(data.user_id)
+    user_id = data.user_id or str(uuid.uuid4())
+
+    user_ref = db.collection("users").document(user_id)
     user_doc = user_ref.get()
 
     if not user_doc.exists:
-        return {"expired": True, "redirect": "https://enoma.kz"}
+        return {"expired": True}
 
     user_data = user_doc.to_dict()
+
+    if not user_data.get("hasAccess"):
+        return {"expired": True}
+
     expires_at = user_data.get("expiresAt")
 
     if not expires_at:
-        return {"expired": True, "redirect": "https://enoma.kz"}
+        return {"expired": True}
 
     if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
         expires_at = expires_at.replace(tzinfo=None)
 
     if datetime.utcnow() > expires_at:
         user_ref.update({"hasAccess": False})
-        return {
-            "expired": True,
-            "text": "⏳ Время сессии (5 минут) завершено",
-            "redirect": "https://enoma.kz"
-        }
+        return {"expired": True}
 
-    url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
+    url = f"https://general-runtime.voiceflow.com/state/user/{user_id}/interact"
 
     response = requests.post(
         url,
@@ -139,7 +143,7 @@ async def create_forte_order(uid: str):
 @app.get("/forte-success")
 async def forte_success(request: Request):
 
-    order_id = request.query_params.get("id") or request.query_params.get("ID")
+    order_id = request.query_params.get("ID") or request.query_params.get("id")
 
     if not order_id:
         return RedirectResponse("https://enoma.kz")
@@ -163,7 +167,6 @@ async def forte_success(request: Request):
 
     order_data = order_doc.to_dict()
 
-    # защита от повторной обработки
     if order_data.get("isProcessed"):
         uid = order_data["uid"]
         return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
@@ -185,3 +188,46 @@ async def forte_success(request: Request):
     })
 
     return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
+
+# ================= STATUS =================
+@app.get("/subscription-status")
+def subscription_status(uid: str):
+
+    user_ref = db.collection("users").document(uid)
+    user_doc = user_ref.get()
+
+    if not user_doc.exists:
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    data = user_doc.to_dict()
+    expires_at = data.get("expiresAt")
+
+    if not expires_at:
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
+        expires_at = expires_at.replace(tzinfo=None)
+
+    now = datetime.utcnow()
+    remaining = int((expires_at - now).total_seconds())
+
+    if remaining <= 0:
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    return {
+        "hasAccess": True,
+        "remainingSeconds": remaining
+    }
+
+# ================= STATIC =================
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse("manifest.json")
+
+@app.get("/icon-192.png")
+def icon_192():
+    return FileResponse("icon-192.png")
+
+@app.get("/icon-512.png")
+def icon_512():
+    return FileResponse("icon-512.png")
