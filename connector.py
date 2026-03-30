@@ -51,21 +51,28 @@ def ask_voiceflow(data: UserMessage):
     user_doc = user_ref.get()
 
     if not user_doc.exists:
-        return {"expired": True}
+        return {"expired": True, "redirect": "https://enoma.kz"}
 
     user_data = user_doc.to_dict()
     expires_at = user_data.get("expiresAt")
 
     if not expires_at:
-        return {"expired": True}
+        return {"expired": True, "redirect": "https://enoma.kz"}
 
     if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
         expires_at = expires_at.replace(tzinfo=None)
 
+    # 🔥 ЕСЛИ ВРЕМЯ ВЫШЛО
     if datetime.utcnow() > expires_at:
         user_ref.update({"hasAccess": False})
-        return {"expired": True}
 
+        return {
+            "expired": True,
+            "text": "⏳ Время сессии (5 минут) завершено",
+            "redirect": "https://enoma.kz"
+        }
+
+    # ✅ VOICEFLOW
     url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
 
     response = requests.post(
@@ -102,8 +109,8 @@ async def create_forte_order(uid: str):
             "language": "ru",
             "amount": "990.00",
             "currency": "KZT",
-            "description": f"{uid}|seidkona",
-            "title": "SeidKona Session",
+            "description": f"{uid}|5min",
+            "title": "5-minute session",
             "hppRedirectUrl": "https://seidkona-backend.onrender.com/forte-success"
         }
     }
@@ -115,6 +122,9 @@ async def create_forte_order(uid: str):
         headers={"Content-Type": "application/json"}
     )
 
+    if response.status_code != 200:
+        return {"error": response.text}
+
     forte_response = response.json()
 
     order_id = str(forte_response["order"]["id"])
@@ -123,7 +133,8 @@ async def create_forte_order(uid: str):
 
     db.collection("forte_orders").document(order_id).set({
         "uid": uid,
-        "createdAt": datetime.utcnow()
+        "createdAt": datetime.utcnow(),
+        "isProcessed": False
     })
 
     return RedirectResponse(f"{hpp_url}?id={order_id}&password={password}")
@@ -142,17 +153,26 @@ async def forte_success(request: Request):
         auth=(FORTE_USERNAME, FORTE_PASSWORD)
     )
 
-    status = response.json().get("order", {}).get("status")
+    result = response.json()
+    status = result.get("order", {}).get("status")
 
     if status not in ["FullyPaid", "Approved", "Deposited"]:
         return RedirectResponse("https://enoma.kz")
 
-    order_doc = db.collection("forte_orders").document(order_id).get()
+    order_ref = db.collection("forte_orders").document(order_id)
+    order_doc = order_ref.get()
 
     if not order_doc.exists:
         return RedirectResponse("https://enoma.kz")
 
-    uid = order_doc.to_dict()["uid"]
+    order_data = order_doc.to_dict()
+
+    # 🔥 защита от повторной обработки
+    if order_data.get("isProcessed"):
+        uid = order_data["uid"]
+        return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
+
+    uid = order_data["uid"]
 
     now = datetime.utcnow()
     expires_at = now + timedelta(minutes=5)
@@ -162,5 +182,10 @@ async def forte_success(request: Request):
         "expiresAt": expires_at,
         "lastPaymentAt": now
     }, merge=True)
+
+    order_ref.update({
+        "isProcessed": True,
+        "paidAt": now
+    })
 
     return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
