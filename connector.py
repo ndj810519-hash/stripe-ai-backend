@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -43,7 +43,7 @@ class UserMessage(BaseModel):
     message: str
     user_id: str
 
-# ================= ASK =================
+# ================= VOICEFLOW =================
 @app.post("/ask")
 def ask_voiceflow(data: UserMessage):
 
@@ -62,17 +62,14 @@ def ask_voiceflow(data: UserMessage):
     if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
         expires_at = expires_at.replace(tzinfo=None)
 
-    # 🔥 ЕСЛИ ВРЕМЯ ВЫШЛО
     if datetime.utcnow() > expires_at:
         user_ref.update({"hasAccess": False})
-
         return {
             "expired": True,
             "text": "⏳ Время сессии (5 минут) завершено",
             "redirect": "https://enoma.kz"
         }
 
-    # ✅ VOICEFLOW
     url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
 
     response = requests.post(
@@ -122,8 +119,7 @@ async def create_forte_order(uid: str):
         headers={"Content-Type": "application/json"}
     )
 
-    if response.status_code != 200:
-        return {"error": response.text}
+    response.raise_for_status()
 
     forte_response = response.json()
 
@@ -167,7 +163,7 @@ async def forte_success(request: Request):
 
     order_data = order_doc.to_dict()
 
-    # 🔥 защита от повторной обработки
+    # защита от повторной обработки
     if order_data.get("isProcessed"):
         uid = order_data["uid"]
         return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
