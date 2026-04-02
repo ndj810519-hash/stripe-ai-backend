@@ -187,7 +187,7 @@ async def forte_success(request: Request):
         "paidAt": now
     })
 
-    return RedirectResponse(f"http://enoma.kz/seid-chat?uid={uid}")
+    return RedirectResponse(f"http://enoma.kz/seid-chat?uid={uid}&paid=1")
 
 # ================= STATUS =================
 @app.get("/subscription-status")
