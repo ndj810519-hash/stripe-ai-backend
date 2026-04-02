@@ -108,7 +108,7 @@ async def create_forte_order(uid: str):
         "order": {
             "typeRid": "Order_RID",
             "language": "ru",
-            "amount": "990.00",
+            "amount": "10.00",
             "currency": "KZT",
             "description": f"{uid}|5min",
             "title": "5-minute session",
@@ -169,7 +169,7 @@ async def forte_success(request: Request):
 
     if order_data.get("isProcessed"):
         uid = order_data["uid"]
-        return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
+        return RedirectResponse(f"https://enoma.kz/main/seid-chat?uid={uid}")
 
     uid = order_data["uid"]
 
@@ -187,7 +187,7 @@ async def forte_success(request: Request):
         "paidAt": now
     })
 
-    return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
+    return RedirectResponse(f"http://enoma.kz/seid-chat?uid={uid}")
 
 # ================= STATUS =================
 @app.get("/subscription-status")
